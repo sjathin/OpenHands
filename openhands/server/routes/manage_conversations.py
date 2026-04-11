@@ -584,6 +584,61 @@ async def delete_conversation(
     return await _delete_v0_conversation(conversation_id, user_id)
 
 
+class BulkDeleteRequest(BaseModel):
+    """Request body for bulk conversation deletion."""
+
+    model_config = ConfigDict(extra='forbid')
+    conversation_ids: list[str] = Field(..., max_length=50)
+
+
+class BulkDeleteResponse(BaseModel):
+    """Response body for bulk conversation deletion."""
+
+    succeeded: list[str]
+    failed: list[str]
+
+
+@app.post('/conversations/bulk-delete', deprecated=True)
+async def bulk_delete_conversations(
+    body: BulkDeleteRequest,
+    user_id: str | None = Depends(get_user_id),
+    app_conversation_service: AppConversationService = app_conversation_service_dependency,
+    app_conversation_info_service: AppConversationInfoService = app_conversation_info_service_dependency,
+    sandbox_service: SandboxService = sandbox_service_dependency,
+    db_session: AsyncSession = db_session_dependency,
+    httpx_client: httpx.AsyncClient = httpx_client_dependency,
+) -> BulkDeleteResponse:
+    """Delete multiple conversations by ID."""
+    succeeded: list[str] = []
+    failed: list[str] = []
+
+    for conversation_id in body.conversation_ids:
+        try:
+            v1_result = await _try_delete_v1_conversation(
+                conversation_id,
+                app_conversation_service,
+                app_conversation_info_service,
+                sandbox_service,
+                db_session,
+                httpx_client,
+                defer_sandbox_cleanup=True,
+            )
+            if v1_result is not None:
+                succeeded.append(conversation_id)
+                continue
+
+            v0_result = await _delete_v0_conversation(conversation_id, user_id)
+            if v0_result:
+                succeeded.append(conversation_id)
+            else:
+                failed.append(conversation_id)
+        except Exception:
+            logger.warning(f'Failed to delete conversation {conversation_id}')
+            failed.append(conversation_id)
+
+    return BulkDeleteResponse(succeeded=succeeded, failed=failed)
+
+
 async def _try_delete_v1_conversation(
     conversation_id: str,
     app_conversation_service: AppConversationService,
@@ -591,8 +646,15 @@ async def _try_delete_v1_conversation(
     sandbox_service: SandboxService,
     db_session: AsyncSession,
     httpx_client: httpx.AsyncClient,
+    defer_sandbox_cleanup: bool = False,
 ) -> bool | None:
-    """Try to delete a V1 conversation. Returns None if not a V1 conversation."""
+    """Try to delete a V1 conversation. Returns None if not a V1 conversation.
+
+    When defer_sandbox_cleanup is True, the background task that deletes the
+    sandbox and closes db_session/httpx_client is skipped. The caller is
+    responsible for sandbox cleanup (used by bulk delete to avoid closing
+    shared connections mid-loop).
+    """
     result = None
     try:
         conversation_uuid = uuid.UUID(conversation_id)
@@ -624,15 +686,16 @@ async def _try_delete_v1_conversation(
             # Manually commit so that the conversation will vanish from the list
             await db_session.commit()
 
-            # Delete the sandbox in the background (checks remaining conversations first)
-            asyncio.create_task(
-                _finalize_delete_and_close_connections(
-                    sandbox_service,
-                    app_conversation_info.sandbox_id,
-                    db_session,
-                    httpx_client,
+            if not defer_sandbox_cleanup:
+                # Delete the sandbox in the background (checks remaining conversations first)
+                asyncio.create_task(
+                    _finalize_delete_and_close_connections(
+                        sandbox_service,
+                        app_conversation_info.sandbox_id,
+                        db_session,
+                        httpx_client,
+                    )
                 )
-            )
     except Exception:
         # Continue with V0 logic
         pass
