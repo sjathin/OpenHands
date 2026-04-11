@@ -448,7 +448,9 @@ class AppConversationServiceBase(AppConversationService, ABC):
                     120,
                 )
                 if clone_result.exit_code:
-                    _logger.warning(f'Failed to clone dependency repo {repo}: {clone_result.stderr}')
+                    _logger.warning(
+                        f'Failed to clone dependency repo {repo}: {clone_result.stderr}'
+                    )
                 else:
                     _logger.info(f'Cloned dependency repo: {repo}')
             except Exception as e:
