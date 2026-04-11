@@ -545,3 +545,69 @@ def test_load_both_cursorrules_and_agents_md(temp_dir_with_both_cursorrules_and_
     agents_agent = repo_agents['agents']
     assert isinstance(agents_agent, RepoMicroagent)
     assert 'Install deps: `poetry install`' in agents_agent.content
+
+
+def test_dependency_repos_in_frontmatter(tmp_path):
+    """Test that dependency_repos are parsed from frontmatter."""
+    md_content = """---
+name: my-agent
+dependency_repos:
+  - OpenHands/OpenHands
+  - OpenHands/software-agent-sdk
+---
+# My Agent
+Some content here.
+"""
+    md_file = tmp_path / 'my-agent.md'
+    md_file.write_text(md_content)
+
+    agent = BaseMicroagent.load(md_file, tmp_path)
+    assert agent.metadata.dependency_repos == [
+        'OpenHands/OpenHands',
+        'OpenHands/software-agent-sdk',
+    ]
+
+
+def test_dependency_repos_empty_by_default(tmp_path):
+    """Test that dependency_repos defaults to empty list."""
+    md_content = """---
+name: simple-agent
+---
+# Simple Agent
+No dependency repos.
+"""
+    md_file = tmp_path / 'simple.md'
+    md_file.write_text(md_content)
+
+    agent = BaseMicroagent.load(md_file, tmp_path)
+    assert agent.metadata.dependency_repos == []
+
+
+def test_collect_dependency_repos():
+    """Test collecting unique dependency repos from multiple microagents."""
+    from openhands.microagent import collect_dependency_repos
+
+    agents = [
+        RepoMicroagent(
+            name='a',
+            content='',
+            metadata=MicroagentMetadata(
+                name='a',
+                dependency_repos=['org/repo1', 'org/repo2'],
+            ),
+            source='a.md',
+            type=MicroagentType.REPO_KNOWLEDGE,
+        ),
+        RepoMicroagent(
+            name='b',
+            content='',
+            metadata=MicroagentMetadata(
+                name='b',
+                dependency_repos=['org/repo2', 'org/repo3'],
+            ),
+            source='b.md',
+            type=MicroagentType.REPO_KNOWLEDGE,
+        ),
+    ]
+    result = collect_dependency_repos(agents)
+    assert result == ['org/repo1', 'org/repo2', 'org/repo3']

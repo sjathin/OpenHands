@@ -565,6 +565,48 @@ class Runtime(FileEditRuntimeMixin):
 
         return dir_name
 
+    async def clone_dependency_repos(
+        self,
+        dependency_repos: list[str],
+        git_provider_tokens: PROVIDER_TOKEN_TYPE | None,
+    ) -> list[str]:
+        """Clone dependency repos declared in microagent frontmatter.
+
+        Returns list of directory names that were successfully cloned.
+        """
+        cloned: list[str] = []
+        for repo in dependency_repos:
+            dir_name = repo.split('/')[-1]
+            repo_path = self.workspace_root / dir_name
+
+            # Skip if already cloned (e.g. it's the main repo)
+            check = CmdRunAction(command=f'test -d {shlex.quote(str(repo_path))}')
+            obs = await call_sync_from_async(self.run_action, check)
+            if isinstance(obs, CmdOutputObservation) and obs.exit_code == 0:
+                self.log('info', f'Dependency repo {repo} already exists, skipping')
+                cloned.append(dir_name)
+                continue
+
+            try:
+                remote_url = await self.provider_handler.get_authenticated_git_url(repo)
+                if not remote_url:
+                    self.log('warning', f'Could not get URL for dependency repo {repo}')
+                    continue
+
+                clone_action = CmdRunAction(
+                    command=f'git clone {shlex.quote(remote_url)} {shlex.quote(str(repo_path))}'
+                )
+                obs = await call_sync_from_async(self.run_action, clone_action)
+                if isinstance(obs, CmdOutputObservation) and obs.exit_code == 0:
+                    self.log('info', f'Cloned dependency repo: {repo}')
+                    cloned.append(dir_name)
+                else:
+                    self.log('warning', f'Failed to clone dependency repo {repo}')
+            except Exception as e:
+                self.log('warning', f'Error cloning dependency repo {repo}: {e}')
+
+        return cloned
+
     def maybe_run_setup_script(self):
         """Run .openhands/setup.sh if it exists in the workspace or repository."""
         setup_script = '.openhands/setup.sh'

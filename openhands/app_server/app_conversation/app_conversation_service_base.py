@@ -1,3 +1,4 @@
+import io
 import logging
 import os
 import shlex
@@ -12,6 +13,7 @@ if TYPE_CHECKING:
     import httpx
 
 import base62
+import frontmatter
 
 from openhands.app_server.app_conversation.app_conversation_models import (
     AgentType,
@@ -278,6 +280,9 @@ class AppConversationServiceBase(AppConversationService, ABC):
             agent_server_url,
         )
 
+        # Clone dependency repos declared in microagent frontmatter
+        await self._clone_dependency_repos(workspace, project_dir)
+
     async def _configure_git_user_settings(
         self,
         workspace: AsyncRemoteWorkspace,
@@ -380,6 +385,74 @@ class AppConversationServiceBase(AppConversationService, ABC):
         result = await workspace.execute_command(checkout_command, git_dir)
         if result.exit_code:
             _logger.warning(f'Git checkout failed: {result.stderr}')
+
+    async def _clone_dependency_repos(
+        self,
+        workspace: AsyncRemoteWorkspace,
+        project_dir: str,
+    ) -> None:
+        """Read microagent frontmatter and clone any dependency_repos."""
+        microagents_dir = project_dir + '/.openhands/microagents'
+
+        # List .md files in the microagents directory
+        result = await workspace.execute_command(
+            f'find {shlex.quote(microagents_dir)} -name "*.md" 2>/dev/null',
+            workspace.working_dir,
+        )
+        if result.exit_code or not result.stdout.strip():
+            return
+
+        # Parse frontmatter from each file to collect dependency_repos
+        dep_repos: list[str] = []
+        seen: set[str] = set()
+        for md_path in result.stdout.strip().split('\n'):
+            md_path = md_path.strip()
+            if not md_path:
+                continue
+            cat_result = await workspace.execute_command(
+                f'cat {shlex.quote(md_path)}', workspace.working_dir
+            )
+            if cat_result.exit_code or not cat_result.stdout:
+                continue
+            try:
+                loaded = frontmatter.load(io.StringIO(cat_result.stdout))
+                metadata: dict = loaded.metadata or {}
+                for repo in metadata.get('dependency_repos', []):
+                    if repo not in seen:
+                        seen.add(repo)
+                        dep_repos.append(repo)
+            except Exception:
+                continue
+
+        if not dep_repos:
+            return
+
+        _logger.info(f'Cloning dependency repos: {dep_repos}')
+        for repo in dep_repos:
+            dir_name = repo.split('/')[-1]
+            # Skip if already exists
+            check = await workspace.execute_command(
+                f'test -d {shlex.quote(dir_name)}', workspace.working_dir
+            )
+            if check.exit_code == 0:
+                _logger.info(f'Dependency repo {repo} already exists, skipping')
+                continue
+            try:
+                remote_url = await self.user_context.get_authenticated_git_url(repo)
+                if not remote_url:
+                    _logger.warning(f'Could not get URL for dependency repo {repo}')
+                    continue
+                clone_result = await workspace.execute_command(
+                    f'git clone {shlex.quote(remote_url)} {shlex.quote(dir_name)}',
+                    workspace.working_dir,
+                    120,
+                )
+                if clone_result.exit_code:
+                    _logger.warning(f'Failed to clone dependency repo {repo}: {clone_result.stderr}')
+                else:
+                    _logger.info(f'Cloned dependency repo: {repo}')
+            except Exception as e:
+                _logger.warning(f'Error cloning dependency repo {repo}: {e}')
 
     async def maybe_run_setup_script(
         self,

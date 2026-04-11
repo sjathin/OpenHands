@@ -31,6 +31,7 @@ from openhands.integrations.provider import (
 from openhands.llm.llm_registry import LLMRegistry
 from openhands.memory.memory import Memory
 from openhands.microagent.microagent import BaseMicroagent
+from openhands.microagent import collect_dependency_repos
 from openhands.runtime import get_runtime_cls
 from openhands.runtime.base import Runtime
 from openhands.server.services.conversation_stats import ConversationStats
@@ -223,6 +224,19 @@ def create_memory(
             selected_repository
         )
         memory.load_user_workspace_microagents(microagents)
+
+        # Clone dependency repos declared in microagent frontmatter
+        dep_repos = collect_dependency_repos(microagents)
+        if dep_repos:
+            logger.info(f'Cloning dependency repos: {dep_repos}')
+            cloned = call_async_from_sync(
+                runtime.clone_dependency_repos,
+                GENERAL_TIMEOUT,
+                dep_repos,
+                None,
+            )
+            if cloned:
+                logger.info(f'Cloned dependency repos: {cloned}')
 
         if selected_repository and repo_directory:
             memory.set_repository_info(selected_repository, repo_directory)
