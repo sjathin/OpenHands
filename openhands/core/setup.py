@@ -30,8 +30,8 @@ from openhands.integrations.provider import (
 )
 from openhands.llm.llm_registry import LLMRegistry
 from openhands.memory.memory import Memory
-from openhands.microagent.microagent import BaseMicroagent
 from openhands.microagent import collect_dependency_repos
+from openhands.microagent.microagent import BaseMicroagent
 from openhands.runtime import get_runtime_cls
 from openhands.runtime.base import Runtime
 from openhands.server.services.conversation_stats import ConversationStats
