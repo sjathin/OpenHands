@@ -573,8 +573,8 @@ async def delete_conversation(
         db_session,
         httpx_client,
     )
-    if v1_result is not None:
-        return v1_result
+    if v1_result[0] is not None:
+        return v1_result[0]
 
     # Close connections
     await db_session.close()
@@ -598,7 +598,7 @@ class BulkDeleteResponse(BaseModel):
     failed: list[str]
 
 
-@app.post('/conversations/bulk-delete', deprecated=True)
+@app.post('/conversations/bulk-delete')
 async def bulk_delete_conversations(
     body: BulkDeleteRequest,
     user_id: str | None = Depends(get_user_id),
@@ -611,10 +611,11 @@ async def bulk_delete_conversations(
     """Delete multiple conversations by ID."""
     succeeded: list[str] = []
     failed: list[str] = []
+    deferred_sandbox_ids: set[str] = set()
 
     for conversation_id in body.conversation_ids:
         try:
-            v1_result = await _try_delete_v1_conversation(
+            v1_result, sandbox_id = await _try_delete_v1_conversation(
                 conversation_id,
                 app_conversation_service,
                 app_conversation_info_service,
@@ -625,6 +626,8 @@ async def bulk_delete_conversations(
             )
             if v1_result is not None:
                 succeeded.append(conversation_id)
+                if sandbox_id:
+                    deferred_sandbox_ids.add(sandbox_id)
                 continue
 
             v0_result = await _delete_v0_conversation(conversation_id, user_id)
@@ -636,7 +639,37 @@ async def bulk_delete_conversations(
             logger.warning(f'Failed to delete conversation {conversation_id}')
             failed.append(conversation_id)
 
+    # Run deferred sandbox cleanup for all distinct sandbox_ids
+    if deferred_sandbox_ids:
+        asyncio.create_task(
+            _finalize_bulk_sandbox_cleanup(
+                sandbox_service, deferred_sandbox_ids, db_session, httpx_client
+            )
+        )
+
     return BulkDeleteResponse(succeeded=succeeded, failed=failed)
+
+
+async def _finalize_bulk_sandbox_cleanup(
+    sandbox_service: SandboxService,
+    sandbox_ids: set[str],
+    db_session: AsyncSession,
+    httpx_client: httpx.AsyncClient,
+) -> None:
+    """Clean up sandboxes deferred during bulk delete, then close shared connections."""
+    try:
+        for sandbox_id in sandbox_ids:
+            try:
+                num_conversations = await _get_num_conversations_in_sandbox(
+                    sandbox_service, sandbox_id, httpx_client
+                )
+                if num_conversations == 0:
+                    await sandbox_service.delete_sandbox(sandbox_id)
+            except Exception:
+                logger.warning(f'Failed to clean up sandbox {sandbox_id}')
+        await db_session.commit()
+    finally:
+        await asyncio.gather(db_session.aclose(), httpx_client.aclose())
 
 
 async def _try_delete_v1_conversation(
@@ -647,8 +680,11 @@ async def _try_delete_v1_conversation(
     db_session: AsyncSession,
     httpx_client: httpx.AsyncClient,
     defer_sandbox_cleanup: bool = False,
-) -> bool | None:
-    """Try to delete a V1 conversation. Returns None if not a V1 conversation.
+) -> tuple[bool | None, str | None]:
+    """Try to delete a V1 conversation.
+
+    Returns (None, None) if not a V1 conversation.
+    Returns (result, sandbox_id) on success/failure.
 
     When defer_sandbox_cleanup is True, the background task that deletes the
     sandbox and closes db_session/httpx_client is skipped. The caller is
@@ -656,6 +692,7 @@ async def _try_delete_v1_conversation(
     shared connections mid-loop).
     """
     result = None
+    deleted_sandbox_id: str | None = None
     try:
         conversation_uuid = uuid.UUID(conversation_id)
         # Check if it's a V1 conversation by trying to get it
@@ -685,6 +722,7 @@ async def _try_delete_v1_conversation(
 
             # Manually commit so that the conversation will vanish from the list
             await db_session.commit()
+            deleted_sandbox_id = sandbox_id
 
             if not defer_sandbox_cleanup:
                 # Delete the sandbox in the background (checks remaining conversations first)
@@ -700,7 +738,7 @@ async def _try_delete_v1_conversation(
         # Continue with V0 logic
         pass
 
-    return result
+    return result, deleted_sandbox_id
 
 
 async def _finalize_delete_and_close_connections(
