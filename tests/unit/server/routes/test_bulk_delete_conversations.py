@@ -14,7 +14,7 @@ from openhands.server.routes.manage_conversations import (
 async def test_try_delete_v1_returns_sandbox_id_on_success():
     """Test that _try_delete_v1_conversation returns (result, sandbox_id) for V1 conversations."""
     conv_uuid = uuid4()
-    sandbox_id = 'sandbox-abc'
+    sandbox_id = "sandbox-abc"
 
     info = MagicMock()
     info.id = conv_uuid
@@ -51,7 +51,7 @@ async def test_try_delete_v1_returns_none_for_non_v1():
     app_conversation_info_service.get_app_conversation_info.return_value = None
 
     result, sandbox_id = await _try_delete_v1_conversation(
-        'not-a-uuid',
+        "not-a-uuid",
         AsyncMock(),
         app_conversation_info_service,
         AsyncMock(),
@@ -68,11 +68,11 @@ async def test_bulk_delete_schedules_sandbox_cleanup():
     """Test that bulk_delete_conversations collects sandbox IDs and schedules cleanup."""
     conv1 = uuid4()
     conv2 = uuid4()
-    sandbox_id = 'sandbox-xyz'
+    sandbox_id = "sandbox-xyz"
 
     with (
         patch(
-            'openhands.server.routes.manage_conversations._try_delete_v1_conversation',
+            "openhands.server.routes.manage_conversations._try_delete_v1_conversation",
             new_callable=AsyncMock,
             side_effect=[
                 (True, sandbox_id),  # conv1: V1 with sandbox
@@ -80,18 +80,16 @@ async def test_bulk_delete_schedules_sandbox_cleanup():
             ],
         ),
         patch(
-            'openhands.server.routes.manage_conversations._delete_v0_conversation',
+            "openhands.server.routes.manage_conversations._delete_v0_conversation",
             new_callable=AsyncMock,
             return_value=True,
         ),
-        patch(
-            'openhands.server.routes.manage_conversations.asyncio'
-        ) as mock_asyncio,
+        patch("openhands.server.routes.manage_conversations.asyncio") as mock_asyncio,
     ):
         body = BulkDeleteRequest(conversation_ids=[conv1.hex, conv2.hex])
         result = await bulk_delete_conversations(
             body=body,
-            user_id='user-1',
+            user_id="user-1",
             app_conversation_service=AsyncMock(),
             app_conversation_info_service=AsyncMock(),
             sandbox_service=AsyncMock(),
@@ -110,23 +108,21 @@ async def test_bulk_delete_skips_cleanup_when_no_v1_sandboxes():
     """Test that bulk_delete_conversations does not schedule cleanup for V0-only deletes."""
     with (
         patch(
-            'openhands.server.routes.manage_conversations._try_delete_v1_conversation',
+            "openhands.server.routes.manage_conversations._try_delete_v1_conversation",
             new_callable=AsyncMock,
             return_value=(None, None),
         ),
         patch(
-            'openhands.server.routes.manage_conversations._delete_v0_conversation',
+            "openhands.server.routes.manage_conversations._delete_v0_conversation",
             new_callable=AsyncMock,
             return_value=True,
         ),
-        patch(
-            'openhands.server.routes.manage_conversations.asyncio'
-        ) as mock_asyncio,
+        patch("openhands.server.routes.manage_conversations.asyncio") as mock_asyncio,
     ):
-        body = BulkDeleteRequest(conversation_ids=['abc123'])
+        body = BulkDeleteRequest(conversation_ids=["abc123"])
         result = await bulk_delete_conversations(
             body=body,
-            user_id='user-1',
+            user_id="user-1",
             app_conversation_service=AsyncMock(),
             app_conversation_info_service=AsyncMock(),
             sandbox_service=AsyncMock(),
@@ -134,7 +130,7 @@ async def test_bulk_delete_skips_cleanup_when_no_v1_sandboxes():
             httpx_client=AsyncMock(),
         )
 
-    assert result.succeeded == ['abc123']
+    assert result.succeeded == ["abc123"]
     mock_asyncio.create_task.assert_not_called()
 
 
@@ -143,18 +139,16 @@ async def test_bulk_delete_reports_failures_on_exception():
     """Test that bulk_delete_conversations catches exceptions and reports them as failures."""
     with (
         patch(
-            'openhands.server.routes.manage_conversations._try_delete_v1_conversation',
+            "openhands.server.routes.manage_conversations._try_delete_v1_conversation",
             new_callable=AsyncMock,
-            side_effect=Exception('boom'),
+            side_effect=Exception("boom"),
         ),
-        patch(
-            'openhands.server.routes.manage_conversations.asyncio'
-        ),
+        patch("openhands.server.routes.manage_conversations.asyncio"),
     ):
-        body = BulkDeleteRequest(conversation_ids=['fail-id'])
+        body = BulkDeleteRequest(conversation_ids=["fail-id"])
         result = await bulk_delete_conversations(
             body=body,
-            user_id='user-1',
+            user_id="user-1",
             app_conversation_service=AsyncMock(),
             app_conversation_info_service=AsyncMock(),
             sandbox_service=AsyncMock(),
@@ -163,4 +157,4 @@ async def test_bulk_delete_reports_failures_on_exception():
         )
 
     assert result.succeeded == []
-    assert result.failed == ['fail-id']
+    assert result.failed == ["fail-id"]
