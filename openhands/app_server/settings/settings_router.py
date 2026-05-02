@@ -4,10 +4,13 @@ This module provides the V1 API routes for user settings under /api/v1/settings.
 """
 
 import os
+import shutil
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, status
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
 from openhands.app_server.utils.dependencies import get_dependencies
 from openhands.core.logger import openhands_logger as logger
@@ -16,6 +19,10 @@ from openhands.integrations.provider import (
     ProviderType,
 )
 from openhands.sdk.settings import AgentSettings, ConversationSettings
+from openhands.server.personal_skills_repo import (
+    clone_repo_at_commit,
+    resolve_repo_commit,
+)
 from openhands.server.routes.secrets import invalidate_legacy_secrets_store
 from openhands.server.settings import (
     GETSettingsModel,
@@ -247,3 +254,163 @@ async def load_settings_schema() -> dict[str, Any]:
 async def load_conversation_settings_schema() -> dict[str, Any]:
     """Load the schema for conversations"""
     return ConversationSettings.export_schema().model_dump(mode='json')
+
+
+class PersonalSkillsRepoRequest(BaseModel):
+    """Request body for setting a personal skills repo."""
+
+    repo_url: str
+
+
+class PersonalSkillsRepoResponse(BaseModel):
+    """Response for personal skills repo operations."""
+
+    repo_url: str | None
+    commit: str | None
+    updated_at: str | None
+
+
+def _get_github_token(
+    provider_tokens: PROVIDER_TOKEN_TYPE | None,
+) -> str | None:
+    """Extract GitHub token from provider tokens if available."""
+    if not provider_tokens:
+        return None
+    gh_token = provider_tokens.get(ProviderType.GITHUB)
+    if gh_token and gh_token.token:
+        t = gh_token.token
+        return t.get_secret_value() if hasattr(t, 'get_secret_value') else str(t)
+    return None
+
+
+@router.post(
+    '/personal-skills-repo',
+    response_model=PersonalSkillsRepoResponse,
+    responses={
+        400: {'description': 'Invalid repo URL', 'model': dict},
+        500: {'description': 'Error resolving repo', 'model': dict},
+    },
+)
+async def set_personal_skills_repo(
+    payload: PersonalSkillsRepoRequest,
+    settings_store: SettingsStore = Depends(get_user_settings_store),
+    provider_tokens: PROVIDER_TOKEN_TYPE | None = Depends(get_provider_tokens),
+) -> PersonalSkillsRepoResponse | JSONResponse:
+    """Set and pin a personal skills repository.
+
+    Resolves the repo URL to the current HEAD commit hash and stores it.
+    Uses the user's GitHub token for private repo access if available.
+    """
+    repo_url = payload.repo_url.strip()
+    if not repo_url:
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={'error': 'repo_url is required'},
+        )
+
+    token = _get_github_token(provider_tokens)
+
+    try:
+        commit = resolve_repo_commit(repo_url, token)
+    except ValueError as e:
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={'error': str(e)},
+        )
+
+    try:
+        clone_repo_at_commit(repo_url, commit, token)
+    except ValueError as e:
+        logger.warning(f'Failed to clone personal skills repo: {e}')
+
+    now = datetime.now(timezone.utc)
+    existing = await settings_store.load()
+    settings = existing.model_copy() if existing else Settings()
+    settings.personal_skills_repo_url = repo_url
+    settings.personal_skills_repo_commit = commit
+    settings.personal_skills_repo_updated_at = now
+    await settings_store.store(settings)
+
+    return PersonalSkillsRepoResponse(
+        repo_url=repo_url,
+        commit=commit,
+        updated_at=now.isoformat(),
+    )
+
+
+@router.post(
+    '/personal-skills-repo/update',
+    response_model=PersonalSkillsRepoResponse,
+    responses={
+        404: {'description': 'No personal skills repo configured', 'model': dict},
+        400: {'description': 'Error resolving repo', 'model': dict},
+    },
+)
+async def update_personal_skills_repo(
+    settings_store: SettingsStore = Depends(get_user_settings_store),
+    provider_tokens: PROVIDER_TOKEN_TYPE | None = Depends(get_provider_tokens),
+) -> PersonalSkillsRepoResponse | JSONResponse:
+    """Update the pinned commit of the personal skills repo to latest HEAD."""
+    existing = await settings_store.load()
+    if not existing or not existing.personal_skills_repo_url:
+        return JSONResponse(
+            status_code=status.HTTP_404_NOT_FOUND,
+            content={'error': 'No personal skills repo configured'},
+        )
+
+    token = _get_github_token(provider_tokens)
+
+    try:
+        commit = resolve_repo_commit(existing.personal_skills_repo_url, token)
+    except ValueError as e:
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={'error': str(e)},
+        )
+
+    try:
+        clone_repo_at_commit(existing.personal_skills_repo_url, commit, token)
+    except ValueError as e:
+        logger.warning(f'Failed to clone personal skills repo on update: {e}')
+
+    now = datetime.now(timezone.utc)
+    settings = existing.model_copy()
+    settings.personal_skills_repo_commit = commit
+    settings.personal_skills_repo_updated_at = now
+    await settings_store.store(settings)
+
+    return PersonalSkillsRepoResponse(
+        repo_url=settings.personal_skills_repo_url,
+        commit=commit,
+        updated_at=now.isoformat(),
+    )
+
+
+@router.delete(
+    '/personal-skills-repo',
+    responses={
+        200: {'description': 'Personal skills repo removed', 'model': dict},
+    },
+)
+async def remove_personal_skills_repo(
+    settings_store: SettingsStore = Depends(get_user_settings_store),
+) -> JSONResponse:
+    """Remove the personal skills repo configuration."""
+    from openhands.server.personal_skills_repo import PERSONAL_SKILLS_CACHE_DIR
+
+    existing = await settings_store.load()
+    if existing:
+        settings = existing.model_copy()
+        settings.personal_skills_repo_url = None
+        settings.personal_skills_repo_commit = None
+        settings.personal_skills_repo_updated_at = None
+        await settings_store.store(settings)
+
+    # Clean up cached clone
+    if PERSONAL_SKILLS_CACHE_DIR.exists():
+        shutil.rmtree(PERSONAL_SKILLS_CACHE_DIR, ignore_errors=True)
+
+    return JSONResponse(
+        status_code=status.HTTP_200_OK,
+        content={'message': 'Personal skills repo removed'},
+    )

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from enum import Enum
 from typing import Annotated, Any
 
@@ -113,6 +114,9 @@ class Settings(BaseModel):
     sandbox_base_container_image: str | None = None
     sandbox_runtime_container_image: str | None = None
     disabled_skills: list[str] | None = None
+    personal_skills_repo_url: str | None = None
+    personal_skills_repo_commit: str | None = None
+    personal_skills_repo_updated_at: datetime | None = None
     search_api_key: SecretStr | None = None
     sandbox_api_key: SecretStr | None = None
     max_budget_per_task: float | None = None

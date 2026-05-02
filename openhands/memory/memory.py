@@ -297,6 +297,7 @@ class Memory:
 
     def _load_user_microagents(self) -> None:
         """Loads microagents from the user's home directory (~/.openhands/microagents/)
+        and from the personal skills repo if configured.
         Creates the directory if it doesn't exist.
         """
         try:
@@ -316,6 +317,38 @@ class Memory:
             logger.warning(
                 f'Failed to load user microagents from {USER_MICROAGENTS_DIR}: {str(e)}'
             )
+
+        # Load microagents from personal skills repo if configured
+        self._load_personal_skills_repo()
+
+    def _load_personal_skills_repo(self) -> None:
+        """Load microagents from the user's personal skills repo if configured."""
+        try:
+            from openhands.server.personal_skills_repo import (
+                PERSONAL_SKILLS_CACHE_DIR,
+                get_skills_dir_from_repo,
+            )
+
+            if not PERSONAL_SKILLS_CACHE_DIR.exists():
+                return
+
+            skills_dir = get_skills_dir_from_repo(PERSONAL_SKILLS_CACHE_DIR)
+            if not skills_dir:
+                logger.debug('No skills directory found in personal skills repo')
+                return
+
+            repo_agents, knowledge_agents = load_microagents_from_dir(skills_dir)
+            for k_name, k_agent in knowledge_agents.items():
+                self.knowledge_microagents[k_name] = k_agent
+            for r_name, r_agent in repo_agents.items():
+                self.repo_microagents[r_name] = r_agent
+
+            logger.info(
+                f'Loaded {len(repo_agents) + len(knowledge_agents)} microagents '
+                f'from personal skills repo'
+            )
+        except Exception as e:
+            logger.warning(f'Failed to load personal skills repo: {str(e)}')
 
     def get_microagent_mcp_tools(self) -> list[MCPConfig]:
         """Get MCP tools from all repo microagents (always active)

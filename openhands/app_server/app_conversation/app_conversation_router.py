@@ -1,12 +1,14 @@
 """Sandboxed Conversation router for OpenHands App Server."""
 
 import asyncio
+import json
 import logging
 import os
 import sys
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Annotated, AsyncGenerator, Literal
 from uuid import UUID
 
@@ -74,8 +76,13 @@ from openhands.app_server.utils.dependencies import get_dependencies
 from openhands.app_server.utils.docker_utils import (
     replace_localhost_hostname_for_docker,
 )
-from openhands.sdk.skills import KeywordTrigger, TaskTrigger
+from openhands.microagent import load_microagents_from_dir
+from openhands.sdk.skills import KeywordTrigger, Skill, TaskTrigger
 from openhands.sdk.workspace.remote.async_remote_workspace import AsyncRemoteWorkspace
+from openhands.server.personal_skills_repo import (
+    PERSONAL_SKILLS_CACHE_DIR,
+    get_skills_dir_from_repo,
+)
 
 # Handle anext compatibility for Python < 3.10
 if sys.version_info >= (3, 10):
@@ -695,8 +702,11 @@ async def get_conversation_skills(
     - Sandbox skills (exposed URLs)
     - Global skills (OpenHands/skills/)
     - User skills (~/.openhands/skills/)
+    - Personal skills repo (if configured)
     - Organization skills (org/.openhands repository)
     - Repository skills (repo .agents/skills/, .openhands/microagents/, and legacy .openhands/skills/)
+
+    Disabled skills (from user settings) are filtered out.
 
     Returns:
         JSONResponse: A JSON response containing the list of skills.
@@ -730,6 +740,42 @@ async def get_conversation_skills(
                 project_dir,
                 ctx.agent_server_url,
             )
+
+        # Load personal skills repo skills
+        try:
+            if PERSONAL_SKILLS_CACHE_DIR.exists():
+                skills_dir = get_skills_dir_from_repo(PERSONAL_SKILLS_CACHE_DIR)
+                if skills_dir:
+                    repo_agents, knowledge_agents = load_microagents_from_dir(skills_dir)
+                    for agent in (*repo_agents.values(), *knowledge_agents.values()):
+                        trigger: KeywordTrigger | TaskTrigger | None = None
+                        if agent.metadata.triggers:
+                            if any(t.startswith('/') for t in agent.metadata.triggers):
+                                trigger = TaskTrigger(triggers=agent.metadata.triggers)
+                            else:
+                                trigger = KeywordTrigger(keywords=agent.metadata.triggers)
+                        skill_name = agent.metadata.name if agent.metadata.name != 'default' else agent.name
+                        all_skills.append(Skill(
+                            name=skill_name,
+                            content=agent.content,
+                            trigger=trigger,
+                            source='personal_repo',
+                        ))
+        except Exception as e:
+            logger.debug(f'Failed to load personal repo skills: {e}')
+
+        # Filter out disabled skills from user settings
+        try:
+            settings_path = Path.home() / '.openhands' / 'settings.json'
+            if settings_path.exists():
+                with open(settings_path) as f:
+                    data = json.load(f)
+                disabled = data.get('disabled_skills') or []
+                if disabled:
+                    disabled_set = set(disabled)
+                    all_skills = [s for s in all_skills if s.name not in disabled_set]
+        except Exception as e:
+            logger.debug(f'Failed to load disabled_skills: {e}')
 
         logger.info(
             f'Loaded {len(all_skills)} skills for conversation {conversation_id}: '
